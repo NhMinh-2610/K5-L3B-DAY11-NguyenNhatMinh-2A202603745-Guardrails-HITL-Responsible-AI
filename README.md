@@ -1,5 +1,120 @@
 # Day 11 — Controlled Agent Security (2026)
 
+## Bài làm — Nguyễn Nhật Minh · 2A202603745 · K5-L3B
+
+Bản này triển khai CP2–CP4, chọn **B1**, dùng **OpenRouter cho Blue** và
+**Gemini cho Red / Red Advance**, bao gồm NeMo self-check, theo đúng provider
+và model của đề gốc. Không sửa dữ liệu protected hoặc giảm phòng thủ Red
+Advance để lấy kết quả. Điểm leak và bonus do coach/grader replay quyết định.
+
+### Chạy trên Windows
+
+Dùng Python 3.11 như CI, tạo virtualenv, cài `requirements.txt`, rồi sao chép
+`.env.example` thành `.env` **nếu chưa có**. Điền `OPENROUTER_API_KEY` và
+`GOOGLE_API_KEY`; giữ `RED_TEAM_PROVIDER=gemini`, `GOOGLE_GENAI_USE_VERTEXAI=0`
+và `GEMINI_MODEL=gemini-3.5-flash`. Key thật chỉ lưu local. Nếu chọn OpenAI,
+dùng `RED_TEAM_PROVIDER=openai`, `OPENAI_API_KEY` và `OPENAI_MODEL=gpt-4o-mini`.
+
+```powershell
+# Setup một lần trên bản clone mới; bỏ qua nếu .venv đã có.
+$labEnvPath = Join-Path $env:LOCALAPPDATA 'VinBankLab\2A202603745\.venv'
+py -3.11 -m venv $labEnvPath
+New-Item -ItemType Junction -Path .venv -Target $labEnvPath
+.\scripts\python.ps1 -m pip install -r requirements.txt
+Copy-Item .env.example .env  # Chỉ chạy khi chưa có .env
+.\scripts\python.ps1 src/main.py --part 2
+.\scripts\python.ps1 src/main.py --part 3
+.\scripts\python.ps1 src/main.py --part 4
+.\scripts\python.ps1 -m pytest tests/smoke tests/public -q
+.\scripts\python.ps1 scripts/grade.py --submission-dir . --out outputs/grade_report.json
+```
+
+Virtualenv nằm tại đường dẫn ngắn trong LocalAppData; `.venv` là junction trỏ
+đến đó. Launcher PowerShell chạy interpreter tại đường dẫn thật, tránh lỗi
+import và tải Colang của NeMo khi repo OneDrive có tên dài. Cần cài Python
+3.11 nếu `py -3.11` chưa có. Trên đường dẫn ngắn hoặc Linux có thể tạo
+virtualenv trong repo và gọi Python trực tiếp với cùng đối số.
+
+CP2 và smoke tests chạy offline. CP3 chỉ yêu cầu OpenRouter; CP4 chỉ yêu cầu
+key provider Red đã chọn. Không điền key vào chat, log hoặc commit.
+
+### Chạy Gemini với quota thấp
+
+Trong `.env`, giữ model theo đề và cấu hình:
+
+```dotenv
+RED_TEAM_PROVIDER=gemini
+GEMINI_MODEL=gemini-3.5-flash
+GEMINI_MIN_INTERVAL_SECONDS=15
+GEMINI_MAX_RETRIES=2
+GEMINI_MAX_OUTPUT_TOKENS=1024
+```
+
+Điền `GOOGLE_API_KEY` local. Xem RPM/TPM/RPD thực tế của project tại
+[AI Studio](https://aistudio.google.com/rate-limit); 15 giây là khoảng cách
+mặc định của chương trình, không bảo đảm phù hợp mọi quota. Ví dụ, nếu quota
+chỉ 2 RPM, tăng khoảng cách lên 31 giây. Không chạy nhiều cửa sổ song song.
+
+Kết quả Blue đã có thì **chỉ chạy CP4** từ gốc repo:
+
+```powershell
+.\scripts\python.ps1 src/main.py --part 4 --resume
+.\scripts\python.ps1 scripts/grade.py --submission-dir . --out outputs/grade_report.json
+```
+
+CP4 bỏ lượt hỏi thử riêng, giới hạn output và ghi checkpoint sau từng prompt.
+`--resume` dùng lại kết quả thành công khi code, prompt, model và cấu hình sinh
+khớp; chỉ gọi API cho case chưa hoàn tất hoặc từng lỗi. Không sửa tay JSON hoặc
+xóa checkpoint. Nếu cần đo lại toàn bộ, bỏ `--resume`.
+
+Gemini và NeMo dùng chung bộ giãn cách/retry. Lỗi 429/503 tạm thời chờ theo
+`RetryInfo`/`Retry-After`, thử lại tối đa 2 lần; hết quota ngày, quota bằng 0,
+hoặc phải chờ hơn 60 giây thì dừng, lưu phần đã làm và trả mã thoát 1. Kiểm tra
+quota trong AI Studio, rồi chạy lại **cùng lệnh `--resume`** khi quota cho phép.
+Chương trình không đổi key/model hoặc bỏ NeMo để né giới hạn. Lỗi NeMo vẫn
+fail-closed và không được tính là một case hoàn tất.
+
+NeMo có thể cần thêm lượt self-check cho input/output ngoài lượt sinh câu trả
+lời chính. Tests và grader chạy offline; có thể tự kiểm mà không dùng API:
+
+```powershell
+.\scripts\python.ps1 -m pytest tests/smoke tests/public -q
+```
+
+### Cách hoạt động và kiểm chứng
+
+Blue chạy rate limiter → input guardrail → LLM → output guardrail. Audit và
+monitoring là observers của bộ chạy, ghi quyết định/counters thực tế. Mỗi nhóm
+test có trạng thái limiter riêng. Bài kiểm tra spam gửi 15 lượt vào limiter
+liên tiếp, không gọi LLM, để thời gian API không làm hết cửa sổ 60 giây; kết quả
+mặc định là 10 lượt được nhận và 5 lượt bị chặn. Đây là kiểm tra admission,
+không phải 15 câu trả lời mô hình.
+
+OpenRouter 429 được thử lại tối đa 3 lần, ưu tiên `Retry-After` hoặc thời điểm
+reset do server trả về. Nếu hết quota ngày hoặc cần chờ quá 60 giây, bộ chạy
+ghi lỗi để xử lý; không tự đổi model. Việc thử lại API không chạy lại limiter
+và không được tính thành lượt chặn của guardrail.
+
+Egress kiểm tra HTTPS, hostname trong allowlist và secret/PII trước sink.
+NeMo của Red Advance dùng cùng endpoint, model và key Red, tiếp tục chặn khi
+self-check lỗi. Output JSON khai đúng provider/model và ghi lỗi kỹ thuật riêng.
+
+Tests offline dùng model/HTTP giả và ghi dữ liệu vào thư mục tạm của pytest.
+Chúng không tạo artifact nộp bài. CP3/CP4 tạo JSON từ lần chạy thật trong
+`outputs/`; grader tạo `grade_report.json` và `lab_report.md`. Khi chưa chạy
+CP3, bốn results-contract tests sẽ skip. Chỉ coi phần artifact hoàn tất sau
+khi chạy thật thành công và kiểm tra báo cáo, không chỉ mã thoát của grader.
+
+Năm prompt red-team có giải thích kỹ thuật trong code, không nhúng sẵn giá trị
+secret để tránh nhầm việc model lặp lại input với leak. Kỹ thuật nhiều bước
+được trình bày trong một request; runtime hiện không lưu hội thoại nhiều lượt.
+
+Các lần chạy trước bằng provider ngoài đề được lưu cục bộ trong
+`.local-artifacts/` (Git bỏ qua). Chỉ nộp `outputs/` đã tạo lại bằng provider
+và model của đề; grader sẽ báo thiếu artifact nếu chưa chạy lại CP4.
+
+---
+
 > 👤 **Hình thức:** bài tập **cá nhân** (1 người / 1 MSSV).  
 > 🎯 **Mục tiêu:** đóng vai **Blue Team** để học cách xây Guardrails phòng thủ, rồi đóng vai **Red Team** để tấn công agent **Red** hoặc **Red Advance**.  
 > ✅ Làm theo **Checkpoint 1 → 5** trong [`CHECKPOINTS.md`](CHECKPOINTS.md) · nộp theo [`SUBMISSION.md`](SUBMISSION.md).

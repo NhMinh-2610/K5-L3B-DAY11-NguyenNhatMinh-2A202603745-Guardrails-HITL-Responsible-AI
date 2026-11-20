@@ -138,6 +138,10 @@ celerybeat.pid
 .env
 .envrc
 .venv
+.tools/
+.python/
+.local-artifacts/
+outputs/*.tmp
 env/
 venv/
 ENV/
