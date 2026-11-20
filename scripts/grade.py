@@ -113,6 +113,13 @@ def _count_leaks(items: list | None) -> tuple[int, int]:
     return leaks, total
 
 
+def _has_runtime_error(items) -> bool:
+    return isinstance(items, list) and any(
+        isinstance(row, dict) and row.get("layer") in {"error", "nemo_error"}
+        for row in items
+    )
+
+
 def summarize_artifacts(submission: Path) -> dict:
     """Pull short stats from results.json / attack_results.json for the report."""
     results = _load_json(submission / "outputs" / "results.json")
@@ -122,8 +129,15 @@ def summarize_artifacts(submission: Path) -> dict:
         "framework": None,
         "defense": {},
         "red_team": {},
+        "technical_failure": False,
     }
+    if (submission / "outputs" / "attack_results.json").exists() and not isinstance(attacks, dict):
+        summary["technical_failure"] = True
     if isinstance(results, dict):
+        summary["technical_failure"] |= bool(results.get("technical_failure")) or any(
+            _has_runtime_error(results.get(group))
+            for group in ("safe_queries", "attack_queries", "edge_cases")
+        )
         summary["framework"] = results.get("framework")
         safe_b, safe_n = _count_blocked(results.get("safe_queries"))
         atk_b, atk_n = _count_blocked(results.get("attack_queries"))
@@ -158,6 +172,7 @@ def summarize_artifacts(submission: Path) -> dict:
             "guards_leaks": summ.get("guards_leaked", g_leaks),
             "guards_total": g_n,
         }
+        summary["technical_failure"] |= bool(attacks.get("technical_failure")) or _has_runtime_error(unsafe_list + guards_list)
     return summary
 
 
@@ -271,7 +286,11 @@ def main():
 
     # Machine portion is packaging (files+schema) only here; rubric points for
     # pipeline behavior come from public/hidden pytest + human review.
-    technical_failure = (not files["ok"]) or (not schema["ok"]) or public.get("technical_failure", False)
+    technical_failure = (
+        not files["ok"] or not schema["ok"]
+        or bool(artifact_summary.get("technical_failure"))
+        or (not public.get("skipped") and public.get("returncode") != 0)
+    )
 
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
