@@ -134,10 +134,10 @@ async def part4_attacks():
 
 
 async def main(parts=None):
-    setup_api_key()
-
     if parts is None:
         parts = [2, 3, 4]  # Core: CP2 → CP3 → CP4
+
+    setup_api_key(parts)
 
     for part in parts:
         if part == 2:
@@ -155,6 +155,10 @@ async def main(parts=None):
 
 
 if __name__ == "__main__":
+    # Windows redirected stdout can default to cp1252; logs include Vietnamese.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     parser = argparse.ArgumentParser(
         description=(
             "Lab 11: Guardrails / HITL / Red Team — "

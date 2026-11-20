@@ -18,6 +18,8 @@ Hai tầng model (không trộn):
 from __future__ import annotations
 
 import os
+import sys
+from getpass import getpass
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -139,7 +141,9 @@ def get_red_provider() -> str:
     ).strip().lower()
     if raw in {"gemini", "google", "adk"}:
         return PROVIDER_GEMINI
-    return PROVIDER_OPENAI
+    if raw == PROVIDER_OPENAI:
+        return PROVIDER_OPENAI
+    raise ValueError("RED_TEAM_PROVIDER must be openai or gemini")
 
 
 def get_red_model() -> str:
@@ -170,6 +174,7 @@ def get_openai_api_key() -> str:
 
 
 def red_openai_client_kwargs() -> dict:
+    """Client settings for OpenAI Red; Gemini uses Google ADK."""
     return {"api_key": get_openai_api_key() or None}
 
 
@@ -234,34 +239,32 @@ def is_harder_model() -> bool:
     return any(x in m for x in ("gpt-5.6", "pro", "gemini-3.8", "gemini-3.7"))
 
 
-def setup_api_key():
-    """Ensure keys for Blue (OpenRouter) + Red / Red Advance (OpenAI or Gemini)."""
-    if not get_openrouter_api_key():
-        os.environ["OPENROUTER_API_KEY"] = input(
-            "Enter OpenRouter API Key (Blue): "
-        ).strip()
-    print(f"Blue  — {blue_provider_label()}  [LOCKED]")
+def setup_api_key(parts=None):
+    """Require only keys used by the requested checkpoints; CP2 is offline."""
+    parts = [2, 3, 4] if parts is None else parts
+    required = []
+    if 3 in parts:
+        required.append("OPENROUTER_API_KEY")
+        print(f"Blue — {blue_provider_label()} [LOCKED]")
+    if 4 in parts:
+        red = get_red_provider()
+        required.append({
+            PROVIDER_OPENAI: "OPENAI_API_KEY",
+            PROVIDER_GEMINI: "GOOGLE_API_KEY",
+        }[red])
+        if red == PROVIDER_GEMINI:
+            os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "0"
+        print(f"Red / Red Advance — {red_provider_label()}")
 
-    red = get_red_provider()
-    model = get_red_model()
-    if red == PROVIDER_GEMINI:
-        if not os.environ.get("GOOGLE_API_KEY", "").strip():
-            os.environ["GOOGLE_API_KEY"] = input("Enter Google API Key (Red): ").strip()
-        os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "0"
-        print(f"Red / Red Advance  — gemini:{model}")
-    else:
-        if not get_openai_api_key():
-            os.environ["OPENAI_API_KEY"] = input("Enter OpenAI API Key (Red): ").strip()
-        print(f"Red / Red Advance  — openai:{model}")
-
-    print(
-        "Bonus: chọn một — Red tối đa +5 (B1) hoặc Red Advance tối đa +10 (B2)."
-    )
-    if is_harder_model():
-        print(
-            f"Model khó ({model}) — tuỳ chọn; không đổi tên agent. "
-            f"(Gợi ý: {HARD_OPENAI_MODEL} / {HARD_GEMINI_MODEL})"
-        )
+    for name in required:
+        value = os.environ.get(name, "").strip()
+        if not value or "..." in value or value.startswith("your-"):
+            if not sys.stdin.isatty():
+                raise RuntimeError(f"Set {name} in local .env before running this checkpoint.")
+            value = getpass(f"Enter {name}: ").strip()
+            if not value or "..." in value:
+                raise RuntimeError(f"A real {name} is required.")
+            os.environ[name] = value
 
 
 ALLOWED_TOPICS = [

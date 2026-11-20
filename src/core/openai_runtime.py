@@ -8,7 +8,12 @@ Gemini Red Team dùng Google ADK trong agents/*.py — không đi qua file này.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
+from email.utils import parsedate_to_datetime
+from inspect import isawaitable
+import math
+import time
 from typing import Any, Callable
 
 from core.config import (
@@ -18,7 +23,36 @@ from core.config import (
     get_blue_provider,
     blue_client_kwargs,
     red_openai_client_kwargs,
+    PROVIDER_OPENROUTER,
 )
+
+
+def _openrouter_retry_delay(error, attempt: int) -> float | None:
+    """Respect server reset times, without retrying a depleted daily quota."""
+    body = error.body if isinstance(error.body, dict) else {}
+    detail = body.get("error", body)
+    metadata = detail.get("metadata", {}) if isinstance(detail, dict) else {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    if metadata.get("limit_source") == "openrouter_free_tier_daily":
+        return None
+    headers = {name.lower(): value for name, value in error.response.headers.items()}
+    if isinstance(metadata.get("headers"), dict):
+        headers.update({name.lower(): str(value) for name, value in metadata["headers"].items()})
+    delay = min(10 * 2 ** attempt, 40)
+    try:
+        if "retry-after" in headers:
+            try:
+                delay = float(headers["retry-after"])
+            except ValueError:
+                delay = parsedate_to_datetime(headers["retry-after"]).timestamp() - time.time()
+        elif "x-ratelimit-reset" in headers:
+            delay = float(headers["x-ratelimit-reset"]) / 1000 - time.time() + 1
+    except (ValueError, TypeError, OverflowError):
+        pass
+    if not math.isfinite(delay) or delay > 60:
+        return None
+    return max(0, delay)
 
 
 @dataclass
@@ -49,7 +83,10 @@ class OpenAIRunner:
     def _client(self):
         from openai import OpenAI
 
-        return OpenAI(**(self.client_kwargs or {}))
+        if not self.client_kwargs.get("api_key"):
+            raise RuntimeError(f"Missing API key for {self.provider}; configure local .env.")
+        retries = 0 if self.provider == PROVIDER_OPENROUTER else 1
+        return OpenAI(timeout=60, max_retries=retries, **(self.client_kwargs or {}))
 
     async def chat(self, agent: OpenAIAgent, user_message: str) -> str:
         for hook in self.input_hooks:
@@ -62,15 +99,31 @@ class OpenAIRunner:
             return block_msg
 
         client = self._client()
-        completion = client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": agent.instruction},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=self.temperature,
-        )
+        from openai import RateLimitError
+
+        attempts = 4 if self.provider == PROVIDER_OPENROUTER else 1
+        for attempt in range(attempts):
+            try:
+                completion = client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": agent.instruction},
+                        {"role": "user", "content": user_message},
+                    ],
+                    temperature=self.temperature,
+                )
+                break
+            except RateLimitError as error:
+                if attempt == attempts - 1:
+                    raise
+                delay = _openrouter_retry_delay(error, attempt)
+                if delay is None:
+                    raise
+                print(f"OpenRouter HTTP 429: retry {attempt + 1}/{attempts - 1} after {delay:.1f}s.", flush=True)
+                await asyncio.sleep(delay)
         text = (completion.choices[0].message.content or "").strip()
+        if not text:
+            raise RuntimeError("Provider returned an empty response")
 
         for hook in self.output_hooks:
             text = hook(text)
@@ -81,10 +134,7 @@ class OpenAIRunner:
     async def _run_input_plugins(self, user_message: str) -> str | None:
         if not self.plugins:
             return None
-        try:
-            from google.genai import types
-        except ImportError:
-            return None
+        from google.genai import types
 
         user_content = types.Content(
             role="user",
@@ -95,12 +145,9 @@ class OpenAIRunner:
             cb = getattr(plugin, "on_user_message_callback", None)
             if cb is None:
                 continue
-            try:
-                result = await cb(
-                    invocation_context=ctx, user_message=user_content
-                )
-            except TypeError:
-                result = cb(invocation_context=ctx, user_message=user_content)
+            result = cb(invocation_context=ctx, user_message=user_content)
+            if isawaitable(result):
+                result = await result
             if result is None:
                 continue
             return _content_to_text(result)
@@ -109,10 +156,7 @@ class OpenAIRunner:
     async def _run_output_plugins(self, text: str) -> str:
         if not self.plugins or not text:
             return text
-        try:
-            from google.genai import types
-        except ImportError:
-            return text
+        from google.genai import types
 
         content = types.Content(
             role="model", parts=[types.Part.from_text(text=text)]
@@ -131,13 +175,12 @@ class OpenAIRunner:
             cb = getattr(plugin, "after_model_callback", None)
             if cb is None:
                 continue
-            try:
-                out = await cb(callback_context=_Ctx(), llm_response=llm_response)
-            except TypeError:
-                out = cb(callback_context=_Ctx(), llm_response=llm_response)
+            out = cb(callback_context=_Ctx(), llm_response=llm_response)
+            if isawaitable(out):
+                out = await out
             if out is not None and getattr(out, "content", None) is not None:
                 llm_response = out
-        return _content_to_text(llm_response.content) or text
+        return _content_to_text(llm_response.content)
 
 
 def _content_to_text(content: Any) -> str:
