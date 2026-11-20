@@ -8,7 +8,7 @@ from core.openai_runtime import OpenAIRunner
 async def chat_with_agent(agent, runner, user_message: str, session_id=None):
     """Send a message to the agent and get the response.
 
-    Works with OpenAIRunner (OpenAI Red / OpenRouter Blue) and Google ADK (Gemini Red).
+    Works with OpenAIRunner (OpenAI Red, OpenRouter Blue) and Gemini ADK.
     """
     provider = getattr(runner, "provider", None)
     if isinstance(runner, OpenAIRunner) or provider in ("openrouter", "openai"):
@@ -53,4 +53,6 @@ async def chat_with_agent(agent, runner, user_message: str, session_id=None):
                 if hasattr(part, "text") and part.text:
                     final_response += part.text
 
+    if not final_response.strip():
+        raise RuntimeError("Gemini returned no text; check GEMINI_MAX_OUTPUT_TOKENS and model availability.")
     return final_response, session

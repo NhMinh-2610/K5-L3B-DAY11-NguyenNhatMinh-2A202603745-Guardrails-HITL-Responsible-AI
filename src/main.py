@@ -81,35 +81,46 @@ async def part3_assignment_suite():
         return None
 
 
-async def part4_attacks():
+async def part4_attacks(*, resume=False):
     """Checkpoint 4: attack Red, then Red Advance (bonus)."""
     print("\n" + "=" * 60)
     print("CHECKPOINT 4: Red + Red Advance")
     print("=" * 60)
 
-    from agents.agent import create_red_agent_default, test_agent
+    from agents.agent import create_red_agent_default
     from agents.guards_agent import create_red_agent_advance
-    from attacks.attacks import run_attacks, save_attack_results
+    from attacks.attacks import adversarial_prompts, run_attacks, save_attack_results
 
     red_default, red_default_runner = create_red_agent_default()
-    await test_agent(red_default, red_default_runner)
 
     print("\n--- Attacks on Red ---")
     unsafe_results = await run_attacks(
-        red_default, red_default_runner, target_name="red_default"
+        red_default, red_default_runner, target_name="red_default", resume=resume
     )
+
+    def incomplete(rows):
+        return len(rows) != len(adversarial_prompts) or any(
+            row.get("error") or row.get("layer") in {"error", "nemo_error"} for row in rows
+        )
+
+    if incomplete(unsafe_results):
+        save_attack_results(unsafe_results=unsafe_results, guards_results=[], expected_per_target=len(adversarial_prompts))
+        raise RuntimeError("CP4 paused on Red; checkpoint saved. Check quota and rerun --part 4 --resume.")
 
     print("\n--- Attacks on Red Advance (bonus B2 tối đa +10 nếu LEAKED; chọn 1) ---")
     red_advance, red_advance_runner = create_red_agent_advance()
     guards_results = await run_attacks(
-        red_advance, red_advance_runner, target_name="red_advance"
+        red_advance, red_advance_runner, target_name="red_advance", resume=resume
     )
 
     save_attack_results(
         unsafe_results=unsafe_results,
         guards_results=guards_results,
         ai_attacks=None,
+        expected_per_target=len(adversarial_prompts),
     )
+    if incomplete(guards_results):
+        raise RuntimeError("CP4 paused on Red Advance; checkpoint saved. Check quota and rerun --part 4 --resume.")
 
     red_leaks = sum(1 for r in unsafe_results if r.get("leaked"))
     bonus_leaks = sum(1 for r in guards_results if r.get("leaked"))
@@ -133,7 +144,7 @@ async def part4_attacks():
     }
 
 
-async def main(parts=None):
+async def main(parts=None, *, resume=False):
     if parts is None:
         parts = [2, 3, 4]  # Core: CP2 → CP3 → CP4
 
@@ -145,7 +156,7 @@ async def main(parts=None):
         elif part == 3:
             await part3_assignment_suite()
         elif part == 4:
-            await part4_attacks()
+            await part4_attacks(resume=resume)
         else:
             print(f"Unknown part: {part}. Dùng --part 2, 3, hoặc 4.")
 
@@ -171,9 +182,13 @@ if __name__ == "__main__":
         choices=[2, 3, 4],
         help="2=CP2 guardrails · 3=CP3 suite · 4=CP4 red-team",
     )
+    parser.add_argument("--resume", action="store_true", help="CP4: reuse completed cases when model, prompts and code match")
     args = parser.parse_args()
+    if args.resume and args.part != 4:
+        parser.error("--resume requires --part 4; it does not rerun Blue")
 
-    if args.part:
-        asyncio.run(main(parts=[args.part]))
-    else:
-        asyncio.run(main())
+    try:
+        asyncio.run(main(parts=[args.part] if args.part else None, resume=args.resume))
+    except RuntimeError as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(1)

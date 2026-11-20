@@ -37,6 +37,7 @@ from agents.security_boundary import contains_secret, normalize_for_security
 from core.config import (
     DEMO_SECRETS,
     PROVIDER_GEMINI,
+    PROVIDER_OPENAI,
     get_red_model,
     get_red_provider,
 )
@@ -229,13 +230,17 @@ def require_nemo():
 
 
 def _model_entry(provider: str, model: str) -> dict:
+    if provider not in {PROVIDER_OPENAI, PROVIDER_GEMINI}:
+        raise ValueError("Red provider must be openai or gemini")
     if provider == PROVIDER_GEMINI:
+        from core.gemini_quota import output_token_limit
+
         return {
             "type": "main",
             "engine": "openai",
             "model": model,
             "api_key_env_var": "GOOGLE_API_KEY",
-            "parameters": {"base_url": GEMINI_OPENAI_BASE_URL},
+            "parameters": {"base_url": GEMINI_OPENAI_BASE_URL, "max_retries": 0, "max_tokens": output_token_limit()},
         }
     return {
         "type": "main",
@@ -330,6 +335,7 @@ class NemoRailsGuard:
         if config is None:
             config = build_rails_config(include_model=llm is None)
         self.version = getattr(nemoguardrails, "__version__", "?")
+        self._use_gemini_quota = llm is None and get_red_provider() == PROVIDER_GEMINI
         self.rails = LLMRails(config, llm=llm, verbose=verbose)
         for name, fn in CUSTOM_ACTIONS.items():
             self.rails.register_action(fn, name=name)
@@ -347,7 +353,12 @@ class NemoRailsGuard:
         rail_type = RailType.INPUT if stage == "input" else RailType.OUTPUT
         self.stats[f"{stage}_checked"] += 1
         try:
-            result = await self.rails.check_async(messages, rail_types=[rail_type])
+            if self._use_gemini_quota:
+                from core.gemini_quota import get_gemini_policy
+
+                result = await get_gemini_policy().run(lambda: self.rails.check_async(messages, rail_types=[rail_type]))
+            else:
+                result = await self.rails.check_async(messages, rail_types=[rail_type])
         except Exception as exc:  # fail-closed
             self.stats["errors"] += 1
             self.stats[f"{stage}_blocked"] += 1

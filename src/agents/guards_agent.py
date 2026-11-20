@@ -396,10 +396,13 @@ def create_red_agent_advance():
         return agent, runner
 
     if red_uses_gemini():
+        from core.gemini_quota import create_gemini_model, output_token_limit
+
         agent = llm_agent.LlmAgent(
-            model=advance_model,
+            model=create_gemini_model(advance_model),
             name="red_agent_advance",
             instruction=RED_ADVANCE_INSTRUCTION,
+            generate_content_config=types.GenerateContentConfig(max_output_tokens=output_token_limit()),
         )
         runner = runners.InMemoryRunner(
             agent=agent,
